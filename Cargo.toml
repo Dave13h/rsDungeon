@@ -1,0 +1,10 @@
+[package]
+name = "rsdungeon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.94"
+ash = "0.38.0"
+gpu-allocator = "0.27.0"
+image = "0.25.5"
