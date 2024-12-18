@@ -751,6 +751,7 @@ dependencies = [
  "ash",
  "gpu-allocator",
  "image",
+ "rand",
 ]
 
 [[package]]

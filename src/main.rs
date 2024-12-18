@@ -14,6 +14,7 @@ use ash::{
 };
 use gpu_allocator::vulkan::*;
 use gpu_allocator::MemoryLocation;
+use rand::Rng;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::os::raw::c_void;
@@ -65,9 +66,9 @@ fn main() -> Result<()> {
     let width: u64 = 1280;
     let height: u64 = 720;
     let value_count: u64 = width * height;
-    let red: u32 = 255;
-    let green: u32 = 0;
-    let blue: u32 = 255;
+    let red: u32 = rand::thread_rng().gen_range(0..255);
+    let green: u32 = rand::thread_rng().gen_range(0..255);
+    let blue: u32 = rand::thread_rng().gen_range(0..255);
     let alpha: u32 = 255;
     let value: u32 = red | green << 8 | blue << 16 | alpha << 24;
 
