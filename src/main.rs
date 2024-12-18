@@ -1,21 +1,64 @@
 #![allow(unused)]
 
-use std::{time::Instant, u64};
-
 use anyhow::{Context, Result};
 use ash::{
     self,
     vk::{
-        self, ApplicationInfo, Buffer, BufferCreateInfo, CommandBuffer, CommandBufferAllocateInfo,
-        CommandBufferBeginInfo, CommandBufferUsageFlags, CommandPool, CommandPoolCreateInfo,
-        DeviceCreateInfo, DeviceQueueCreateInfo, Fence, FenceCreateFlags, FenceCreateInfo,
-        InstanceCreateInfo, MemoryRequirements, PhysicalDevice, Queue, SubmitInfo,
+        self, make_api_version, ApplicationInfo, Buffer, BufferCreateInfo, CommandBuffer,
+        CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferUsageFlags, CommandPool,
+        CommandPoolCreateInfo, DebugUtilsMessengerCreateInfoEXT, DeviceCreateInfo,
+        DeviceQueueCreateInfo, Fence, FenceCreateFlags, FenceCreateInfo, InstanceCreateInfo,
+        MemoryRequirements, PhysicalDevice, Queue, SubmitInfo,
     },
     Device, Entry, Instance,
 };
 use gpu_allocator::vulkan::*;
 use gpu_allocator::MemoryLocation;
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+use std::os::raw::c_void;
+use std::ptr;
 use std::time;
+use std::{time::Instant, u64};
+
+const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
+
+pub fn vk_to_string(raw_string_array: &[c_char]) -> String {
+    let raw_string = unsafe {
+        let pointer = raw_string_array.as_ptr();
+        CStr::from_ptr(pointer)
+    };
+
+    raw_string
+        .to_str()
+        .expect("Failed to convert vulkan raw string.")
+        .to_owned()
+}
+
+unsafe extern "system" fn vulkan_debug_utils_callback(
+    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
+    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+    _p_user_data: *mut c_void,
+) -> vk::Bool32 {
+    let severity = match message_severity {
+        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => "[Verbose]",
+        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => "[Warning]",
+        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => "[Error]",
+        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => "[Info]",
+        _ => "[Unknown]",
+    };
+    let types = match message_type {
+        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "[General]",
+        vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "[Performance]",
+        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "[Validation]",
+        _ => "[Unknown]",
+    };
+    let message = CStr::from_ptr((*p_callback_data).p_message);
+    println!("[Debug]{}{}{:?}", severity, types, message);
+
+    vk::FALSE
+}
 
 fn main() -> Result<()> {
     // Data
@@ -31,15 +74,71 @@ fn main() -> Result<()> {
     // Ash setup
     let entry: Entry = unsafe { ash::Entry::load() }?;
 
-    let instance: Instance = {
-        let application_info: ApplicationInfo =
-            vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
+    // Enable validation layer
 
-        let create_info: InstanceCreateInfo =
+    // Setup Instance
+    let instance: Instance = {
+        let application_name = CString::new(env!("CARGO_PKG_NAME")).unwrap();
+        let application_version: u32 = vk::make_api_version(
+            0,
+            env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap(),
+            env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap(),
+            env!("CARGO_PKG_VERSION_PATCH").parse::<u32>().unwrap(),
+        );
+        let application_info: ApplicationInfo = vk::ApplicationInfo::default()
+            .api_version(vk::API_VERSION_1_3)
+            .application_name(application_name.as_c_str())
+            .application_version(application_version);
+
+        let mut create_info: InstanceCreateInfo =
             vk::InstanceCreateInfo::default().application_info(&application_info);
+
+        // Set up the validation layer
+        if (VALIDATION_ENABLED) {
+            let validation_layer_name: CString =
+                CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+
+            unsafe {
+                let layer_properties = entry.enumerate_instance_layer_properties()?;
+
+                if (layer_properties.len() <= 0) {
+                    println!("[VK] No validation layer");
+                }
+
+                let mut validation_layer_found = false;
+                for layer_property in layer_properties.iter() {
+                    let test_layer_name: String = vk_to_string(&layer_property.layer_name);
+                    if (test_layer_name == "VK_LAYER_KHRONOS_validation") {
+                        println!("[VK] Validation Layer found");
+                        validation_layer_found = true;
+                        break;
+                    }
+                }
+            }
+
+            let debug_create_info: DebugUtilsMessengerCreateInfoEXT =
+                vk::DebugUtilsMessengerCreateInfoEXT::default()
+                    .message_severity(
+                        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                            | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+                    )
+                    .message_type(
+                        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                            | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
+                            | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
+                    )
+                    .pfn_user_callback(Some(vulkan_debug_utils_callback));
+
+            let validation_layer_names: Vec<*const i8> = vec![validation_layer_name.as_ptr()];
+
+            create_info.p_next =
+                &debug_create_info as *const vk::DebugUtilsMessengerCreateInfoEXT as *const c_void;
+            create_info.enabled_layer_names(&validation_layer_names);
+        }
         unsafe { entry.create_instance(&create_info, None) }?
     };
 
+    // Build Device
     let physical_device: PhysicalDevice = unsafe { instance.enumerate_physical_devices() }?
         .into_iter()
         .next()
@@ -57,8 +156,10 @@ fn main() -> Result<()> {
         unsafe { instance.create_device(physical_device, &create_info, None) }?
     };
 
+    // Setup Queue
     let queue: Queue = unsafe { device.get_device_queue(0, 0) };
 
+    // Set up Buffer
     let mut allocator = Allocator::new(&AllocatorCreateDesc {
         instance: instance.clone(),
         device: device.clone(),
@@ -76,7 +177,6 @@ fn main() -> Result<()> {
         unsafe { device.create_buffer(&create_info, None) }?
     };
 
-    // Create Allocator
     let allocation: Allocation = {
         let memory_requirements: vk::MemoryRequirements =
             unsafe { device.get_buffer_memory_requirements(buffer) };
@@ -96,6 +196,7 @@ fn main() -> Result<()> {
         allocation
     };
 
+    // Setup CommandPool
     let command_pool: CommandPool = {
         let create_info: CommandPoolCreateInfo =
             vk::CommandPoolCreateInfo::default().queue_family_index(0);
