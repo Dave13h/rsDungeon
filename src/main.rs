@@ -15,12 +15,12 @@ use ash::{
 use gpu_allocator::vulkan::*;
 use gpu_allocator::MemoryLocation;
 use rand::Rng;
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-use std::os::raw::c_void;
-use std::ptr;
-use std::time;
-use std::{time::Instant, u64};
+use std::{
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_void},
+    ptr, time,
+    time::{Instant}
+};
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
