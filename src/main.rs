@@ -21,6 +21,8 @@ use std::{
     ptr, time,
     time::{Instant}
 };
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::window::{Window, WindowId};
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
@@ -62,10 +64,18 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
 }
 
 fn main() -> Result<()> {
+    let application_name = CString::new(env!("CARGO_PKG_NAME")).unwrap();
+    let application_version: u32 = vk::make_api_version(
+        0,
+        env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap(),
+        env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap(),
+        env!("CARGO_PKG_VERSION_PATCH").parse::<u32>().unwrap(),
+    );
+
     // Data
-    let width: u64 = 1280;
-    let height: u64 = 720;
-    let value_count: u64 = width * height;
+    let width: u32 = 1280;
+    let height: u32 = 720;
+    let value_count: u64 = width as u64 * height as u64;
     let red: u32 = rand::thread_rng().gen_range(0..255);
     let green: u32 = rand::thread_rng().gen_range(0..255);
     let blue: u32 = rand::thread_rng().gen_range(0..255);
@@ -75,17 +85,13 @@ fn main() -> Result<()> {
     // Ash setup
     let entry: Entry = unsafe { ash::Entry::load() }?;
 
-    // Enable validation layer
+    // Winit setup
+    let mut event_loop = EventLoop::new().unwrap();
+    let window_attributes = Window::default_attributes().with_title(application_name.to_str().unwrap());
+    let window = Some(event_loop.create_window(window_attributes).unwrap());
 
     // Setup Instance
     let instance: Instance = {
-        let application_name = CString::new(env!("CARGO_PKG_NAME")).unwrap();
-        let application_version: u32 = vk::make_api_version(
-            0,
-            env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap(),
-            env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap(),
-            env!("CARGO_PKG_VERSION_PATCH").parse::<u32>().unwrap(),
-        );
         let application_info: ApplicationInfo = vk::ApplicationInfo::default()
             .api_version(vk::API_VERSION_1_3)
             .application_name(application_name.as_c_str())
@@ -280,5 +286,6 @@ fn main() -> Result<()> {
     unsafe { device.destroy_buffer(buffer, None) };
     unsafe { device.destroy_device(None) }
     unsafe { instance.destroy_instance(None) }
+
     Ok(())
 }
