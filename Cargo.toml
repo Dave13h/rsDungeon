@@ -2,11 +2,19 @@
 name = "rsdungeon"
 version = "0.1.0"
 edition = "2021"
+authors = ["Dave Sloan <davewsloan@gmail.com>"]
 
 [dependencies]
-anyhow = "1.0.94"
-ash = "0.38.0"
-gpu-allocator = "0.27.0"
-image = "0.25.5"
-rand = "0.8.5"
-winit = "0.30.6"
+anyhow = "1"
+log = "0.4"
+cgmath = "0.18"
+png = "0.17"
+pretty_env_logger = "0.5"
+thiserror = "1"
+tobj = { version = "3", features = ["log"] }
+vulkanalia = { version = "=0.26.0", features = [
+    "libloading",
+    "provisional",
+    "window",
+] }
+winit = "0.29"

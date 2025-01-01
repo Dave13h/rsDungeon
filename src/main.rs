@@ -1,291 +1,289 @@
-#![allow(unused)]
+use anyhow::{anyhow, Result};
 
-use anyhow::{Context, Result};
-use ash::{
-    self,
-    vk::{
-        self, make_api_version, ApplicationInfo, Buffer, BufferCreateInfo, CommandBuffer,
-        CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferUsageFlags, CommandPool,
-        CommandPoolCreateInfo, DebugUtilsMessengerCreateInfoEXT, DeviceCreateInfo,
-        DeviceQueueCreateInfo, Fence, FenceCreateFlags, FenceCreateInfo, InstanceCreateInfo,
-        MemoryRequirements, PhysicalDevice, Queue, SubmitInfo,
-    },
-    Device, Entry, Instance,
+use vulkanalia::loader::{LibloadingLoader, LIBRARY};
+use vulkanalia::prelude::v1_0::*;
+use vulkanalia::vk::ExtDebugUtilsExtension;
+use vulkanalia::vk::KhrSurfaceExtension;
+use vulkanalia::vk::KhrSwapchainExtension;
+use vulkanalia::window as vk_window;
+
+use winit::dpi::LogicalSize;
+use winit::event::{Event, WindowEvent};
+use winit::event_loop::EventLoop;
+use winit::window::{Window, WindowBuilder};
+
+use crate::{
+    commandbuffer::*, commandpool::*, device::*, framebuffer::*, instance::*, pipeline::*, queuefamilyindices::*, renderpass::*,
+    swapchain::*, swapchainsupport::*, tools::*,
 };
-use gpu_allocator::vulkan::*;
-use gpu_allocator::MemoryLocation;
-use rand::Rng;
-use std::{
-    ffi::{CStr, CString},
-    os::raw::{c_char, c_void},
-    ptr, time,
-    time::{Instant}
-};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{Window, WindowId};
 
-const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
+mod commandbuffer;
+mod commandpool;
+mod device;
+mod framebuffer;
+mod instance;
+mod pipeline;
+mod queuefamilyindices;
+mod renderpass;
+mod shader;
+mod swapchain;
+mod swapchainsupport;
+mod tools;
 
-pub fn vk_to_string(raw_string_array: &[c_char]) -> String {
-    let raw_string = unsafe {
-        let pointer = raw_string_array.as_ptr();
-        CStr::from_ptr(pointer)
-    };
-
-    raw_string
-        .to_str()
-        .expect("Failed to convert vulkan raw string.")
-        .to_owned()
-}
-
-unsafe extern "system" fn vulkan_debug_utils_callback(
-    message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
-    message_type: vk::DebugUtilsMessageTypeFlagsEXT,
-    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
-    _p_user_data: *mut c_void,
-) -> vk::Bool32 {
-    let severity = match message_severity {
-        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => "[Verbose]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => "[Warning]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => "[Error]",
-        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => "[Info]",
-        _ => "[Unknown]",
-    };
-    let types = match message_type {
-        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "[General]",
-        vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "[Performance]",
-        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "[Validation]",
-        _ => "[Unknown]",
-    };
-    let message = CStr::from_ptr((*p_callback_data).p_message);
-    println!("[Debug]{}{}{:?}", severity, types, message);
-
-    vk::FALSE
-}
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 fn main() -> Result<()> {
-    let application_name = CString::new(env!("CARGO_PKG_NAME")).unwrap();
-    let application_version: u32 = vk::make_api_version(
-        0,
-        env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap(),
-        env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap(),
-        env!("CARGO_PKG_VERSION_PATCH").parse::<u32>().unwrap(),
-    );
+    pretty_env_logger::init();
 
-    // Data
-    let width: u32 = 1280;
-    let height: u32 = 720;
-    let value_count: u64 = width as u64 * height as u64;
-    let red: u32 = rand::thread_rng().gen_range(0..255);
-    let green: u32 = rand::thread_rng().gen_range(0..255);
-    let blue: u32 = rand::thread_rng().gen_range(0..255);
-    let alpha: u32 = 255;
-    let value: u32 = red | green << 8 | blue << 16 | alpha << 24;
+    let event_loop = EventLoop::new()?;
+    let window = WindowBuilder::new()
+        .with_title("Vulkan Rust clusterfuck")
+        .with_inner_size(LogicalSize::new(1280, 720))
+        .build(&event_loop)?;
 
-    // Ash setup
-    let entry: Entry = unsafe { ash::Entry::load() }?;
+    let mut app = unsafe { App::create(&window)? };
+    let mut minimized = false;
+    event_loop.run(move |event, elwt| match event {
+        Event::AboutToWait => window.request_redraw(),
 
-    // Winit setup
-    let mut event_loop = EventLoop::new().unwrap();
-    let window_attributes = Window::default_attributes().with_title(application_name.to_str().unwrap());
-    let window = Some(event_loop.create_window(window_attributes).unwrap());
+        Event::WindowEvent { event, .. } => match event {
+            WindowEvent::RedrawRequested if !elwt.exiting() && !minimized => {
+                unsafe { app.render(&window) }.unwrap();
+            }
 
-    // Setup Instance
-    let instance: Instance = {
-        let application_info: ApplicationInfo = vk::ApplicationInfo::default()
-            .api_version(vk::API_VERSION_1_3)
-            .application_name(application_name.as_c_str())
-            .application_version(application_version);
-
-        let mut create_info: InstanceCreateInfo =
-            vk::InstanceCreateInfo::default().application_info(&application_info);
-
-        // Set up the validation layer
-        if (VALIDATION_ENABLED) {
-            let validation_layer_name: CString =
-                CString::new("VK_LAYER_KHRONOS_validation").unwrap();
-
-            unsafe {
-                let layer_properties = entry.enumerate_instance_layer_properties()?;
-
-                if (layer_properties.len() <= 0) {
-                    println!("[VK] No validation layer");
-                }
-
-                let mut validation_layer_found = false;
-                for layer_property in layer_properties.iter() {
-                    let test_layer_name: String = vk_to_string(&layer_property.layer_name);
-                    if (test_layer_name == "VK_LAYER_KHRONOS_validation") {
-                        println!("[VK] Validation Layer found");
-                        validation_layer_found = true;
-                        break;
-                    }
+            WindowEvent::Resized(size) => {
+                if size.width == 0 || size.height == 0 {
+                    minimized = true;
+                } else {
+                    minimized = false;
+                    app.resized = true;
                 }
             }
 
-            let debug_create_info: DebugUtilsMessengerCreateInfoEXT =
-                vk::DebugUtilsMessengerCreateInfoEXT::default()
-                    .message_severity(
-                        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                            | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
-                    )
-                    .message_type(
-                        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                            | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
-                            | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
-                    )
-                    .pfn_user_callback(Some(vulkan_debug_utils_callback));
-
-            let validation_layer_names: Vec<*const i8> = vec![validation_layer_name.as_ptr()];
-
-            create_info.p_next =
-                &debug_create_info as *const vk::DebugUtilsMessengerCreateInfoEXT as *const c_void;
-            create_info.enabled_layer_names(&validation_layer_names);
-        }
-        unsafe { entry.create_instance(&create_info, None) }?
-    };
-
-    // Build Device
-    let physical_device: PhysicalDevice = unsafe { instance.enumerate_physical_devices() }?
-        .into_iter()
-        .next()
-        .context("No physical Device Found")?;
-
-    let device: Device = {
-        let queue_priorities: [f32; 1] = [1.0];
-        let queue_create_infos: [DeviceQueueCreateInfo; 1] = [DeviceQueueCreateInfo::default()
-            .queue_family_index(0)
-            .queue_priorities(&queue_priorities)];
-
-        let create_info: DeviceCreateInfo =
-            vk::DeviceCreateInfo::default().queue_create_infos(&queue_create_infos);
-
-        unsafe { instance.create_device(physical_device, &create_info, None) }?
-    };
-
-    // Setup Queue
-    let queue: Queue = unsafe { device.get_device_queue(0, 0) };
-
-    // Set up Buffer
-    let mut allocator = Allocator::new(&AllocatorCreateDesc {
-        instance: instance.clone(),
-        device: device.clone(),
-        physical_device,
-        debug_settings: Default::default(),
-        buffer_device_address: true,
-        allocation_sizes: Default::default(),
+            WindowEvent::CloseRequested => {
+                elwt.exit();
+                unsafe {
+                    app.destroy();
+                }
+            }
+            _ => {}
+        },
+        _ => {}
     })?;
 
-    let buffer: Buffer = {
-        let create_info: BufferCreateInfo = vk::BufferCreateInfo::default()
-            .size(value_count * std::mem::size_of::<u32>() as vk::DeviceSize)
-            .usage(vk::BufferUsageFlags::TRANSFER_DST);
+    Ok(())
+}
 
-        unsafe { device.create_buffer(&create_info, None) }?
-    };
+#[derive(Clone, Debug)]
+struct App {
+    _entry: Entry,
+    instance: Instance,
+    data: AppData,
+    device: Device,
+    frame: usize,
+    resized: bool,
+}
 
-    let allocation: Allocation = {
-        let memory_requirements: vk::MemoryRequirements =
-            unsafe { device.get_buffer_memory_requirements(buffer) };
+impl App {
+    unsafe fn create(window: &Window) -> Result<Self> {
+        let loader = LibloadingLoader::new(LIBRARY)?;
+        let _entry = Entry::new(loader).map_err(|b| anyhow!("{}", b))?;
+        let mut data = AppData::default();
+        let instance = create_instance(window, &_entry, &mut data)?;
+        data.surface = vk_window::create_surface(&instance, &window, &window)?;
+        pick_physical_device(&instance, &mut data)?;
+        let device = create_logical_device(&_entry, &instance, &mut data)?;
+        create_swapchain(window, &instance, &device, &mut data)?;
+        create_swapchain_image_views(&device, &mut data)?;
+        create_render_pass(&instance, &device, &mut data)?;
+        create_pipeline(&device, &mut data)?;
+        create_framebuffers(&device, &mut data)?;
+        create_command_pool(&instance, &device, &mut data)?;
+        create_command_buffers(&device, &mut data)?;
+        create_sync_objects(&device, &mut data)?;
+        Ok(Self {
+            _entry,
+            instance,
+            data,
+            device,
+            frame: 0,
+            resized: false,
+        })
+    }
 
-        let allocation_create_description = AllocationCreateDesc {
-            name: "Example allocation",
-            requirements: memory_requirements,
-            location: MemoryLocation::GpuToCpu,
-            linear: true, // Buffers are always linear
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+    unsafe fn render(&mut self, window: &Window) -> Result<()> {
+        let in_flight_fence = self.data.in_flight_fences[self.frame];
+
+        self.device
+            .wait_for_fences(&[in_flight_fence], true, u64::MAX)?;
+
+        let result = self.device.acquire_next_image_khr(
+            self.data.swapchain,
+            u64::MAX,
+            self.data.image_available_semaphores[self.frame],
+            vk::Fence::null(),
+        );
+
+        let image_index = match result {
+            Ok((image_index, _)) => image_index as usize,
+            Err(vk::ErrorCode::OUT_OF_DATE_KHR) => return self.recreate_swapchain(window),
+            Err(e) => return Err(anyhow!(e)),
         };
 
-        let allocation: Allocation = allocator.allocate(&allocation_create_description)?;
+        let image_in_flight = self.data.images_in_flight[image_index];
+        if !image_in_flight.is_null() {
+            self.device
+                .wait_for_fences(&[image_in_flight], true, u64::MAX)?;
+        }
 
-        unsafe { device.bind_buffer_memory(buffer, allocation.memory(), allocation.offset()) };
+        self.data.images_in_flight[image_index] = in_flight_fence;
 
-        allocation
-    };
+        let wait_semaphores = &[self.data.image_available_semaphores[self.frame]];
+        let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let command_buffers = &[self.data.command_buffers[image_index]];
+        let signal_semaphores = &[self.data.render_finished_semaphores[self.frame]];
+        let submit_info = vk::SubmitInfo::builder()
+            .wait_semaphores(wait_semaphores)
+            .wait_dst_stage_mask(wait_stages)
+            .command_buffers(command_buffers)
+            .signal_semaphores(signal_semaphores);
 
-    // Setup CommandPool
-    let command_pool: CommandPool = {
-        let create_info: CommandPoolCreateInfo =
-            vk::CommandPoolCreateInfo::default().queue_family_index(0);
+        self.device.reset_fences(&[in_flight_fence])?;
 
-        unsafe { device.create_command_pool(&create_info, None) }?
-    };
+        self.device
+            .queue_submit(self.data.graphics_queue, &[submit_info], in_flight_fence)?;
 
-    // Create Buffers
-    let command_buffer: CommandBuffer = {
-        let create_info: CommandBufferAllocateInfo = vk::CommandBufferAllocateInfo::default()
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_pool(command_pool)
-            .command_buffer_count(1);
+        let swapchains = &[self.data.swapchain];
+        let image_indices = &[image_index as u32];
+        let present_info = vk::PresentInfoKHR::builder()
+            .wait_semaphores(signal_semaphores)
+            .swapchains(swapchains)
+            .image_indices(image_indices);
 
-        unsafe {
-            device
-                .allocate_command_buffers(&create_info)?
-                .into_iter()
-                .next()
-                .context("No Command Buffers")
-        }?
-    };
+        let result = self
+            .device
+            .queue_present_khr(self.data.present_queue, &present_info);
+        let changed = result == Ok(vk::SuccessCode::SUBOPTIMAL_KHR)
+            || result == Err(vk::ErrorCode::OUT_OF_DATE_KHR);
+        if self.resized || changed {
+            self.resized = false;
+            self.recreate_swapchain(window)?;
+        } else if let Err(e) = result {
+            return Err(anyhow!(e));
+        }
 
-    // Recording Command Buffer
-    {
-        let begin_info: CommandBufferBeginInfo =
-            vk::CommandBufferBeginInfo::default().flags(CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe { device.begin_command_buffer(command_buffer, &begin_info) }?;
+        self.frame = (self.frame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+        Ok(())
     }
 
-    unsafe {
-        device.cmd_fill_buffer(
-            command_buffer,
-            buffer,
-            allocation.offset(),
-            allocation.size(),
-            value,
-        );
+    unsafe fn recreate_swapchain(&mut self, window: &Window) -> Result<()> {
+        self.device.device_wait_idle()?;
+        self.destroy_swapchain();
+        create_swapchain(window, &self.instance, &self.device, &mut self.data)?;
+        create_swapchain_image_views(&self.device, &mut self.data)?;
+        create_render_pass(&self.instance, &self.device, &mut self.data)?;
+        create_pipeline(&self.device, &mut self.data)?;
+        create_framebuffers(&self.device, &mut self.data)?;
+        create_command_buffers(&self.device, &mut self.data)?;
+        self.data
+            .images_in_flight
+            .resize(self.data.swapchain_images.len(), vk::Fence::null());
+        Ok(())
     }
 
-    unsafe { device.end_command_buffer(command_buffer) }?;
+    unsafe fn destroy(&mut self) {
+        self.device.device_wait_idle().unwrap();
 
-    // Execute Command Buffer
-    let fence: Fence = {
-        let create_info: FenceCreateInfo = vk::FenceCreateInfo::default();
-        unsafe { device.create_fence(&create_info, None) }?
-    };
+        self.destroy_swapchain();
 
-    {
-        let submit_info: SubmitInfo =
-            vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
-        unsafe { device.queue_submit(queue, std::slice::from_ref(&submit_info), fence) };
+        self.data
+            .in_flight_fences
+            .iter()
+            .for_each(|f| self.device.destroy_fence(*f, None));
+        self.data
+            .render_finished_semaphores
+            .iter()
+            .for_each(|s| self.device.destroy_semaphore(*s, None));
+        self.data
+            .image_available_semaphores
+            .iter()
+            .for_each(|s| self.device.destroy_semaphore(*s, None));
+        self.device
+            .destroy_command_pool(self.data.command_pool, None);
+        self.device.destroy_device(None);
+        self.instance.destroy_surface_khr(self.data.surface, None);
+
+        if VALIDATION_ENABLED {
+            self.instance
+                .destroy_debug_utils_messenger_ext(self.data.messenger, None);
+        }
+
+        self.instance.destroy_instance(None);
     }
 
-    // Wait for execution
-    let gpu_start: Instant = std::time::Instant::now();
-    unsafe { device.wait_for_fences(std::slice::from_ref(&fence), true, u64::MAX) }?;
-    println!("GPU took {:?}", std::time::Instant::now() - gpu_start);
+    unsafe fn destroy_swapchain(&mut self) {
+        self.device
+            .free_command_buffers(self.data.command_pool, &self.data.command_buffers);
+        self.data
+            .framebuffers
+            .iter()
+            .for_each(|f| self.device.destroy_framebuffer(*f, None));
+        self.device.destroy_pipeline(self.data.pipeline, None);
+        self.device
+            .destroy_pipeline_layout(self.data.pipeline_layout, None);
+        self.device.destroy_render_pass(self.data.render_pass, None);
+        self.data
+            .swapchain_image_views
+            .iter()
+            .for_each(|v| self.device.destroy_image_view(*v, None));
+        self.device.destroy_swapchain_khr(self.data.swapchain, None);
+    }
+}
 
-    // Read back
-    let data: &[u8] = allocation
-        .mapped_slice()
-        .context("Host cannot access buffer")?;
+#[derive(Clone, Debug, Default)]
+struct AppData {
+    messenger: vk::DebugUtilsMessengerEXT,
+    surface: vk::SurfaceKHR,
+    physical_device: vk::PhysicalDevice,
+    graphics_queue: vk::Queue,
+    present_queue: vk::Queue,
+    swapchain_format: vk::Format,
+    swapchain_extent: vk::Extent2D,
+    swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_image_views: Vec<vk::ImageView>,
+    render_pass: vk::RenderPass,
+    pipeline_layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+    framebuffers: Vec<vk::Framebuffer>,
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
+    images_in_flight: Vec<vk::Fence>,
+}
 
-    let png_start: Instant = std::time::Instant::now();
-    image::save_buffer(
-        "tmp/image.png",
-        data,
-        width as u32,
-        height as u32,
-        image::ColorType::Rgba8,
-    );
-    println!("PNG took {:?}", std::time::Instant::now() - png_start);
+unsafe fn create_sync_objects(device: &Device, data: &mut AppData) -> Result<()> {
+    let semaphore_info = vk::SemaphoreCreateInfo::builder();
+    let fence_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
 
-    // Cleanup
-    unsafe { device.destroy_fence(fence, None) };
-    unsafe { device.destroy_command_pool(command_pool, None) }
-    allocator.free(allocation)?;
-    drop(allocator);
-    unsafe { device.destroy_buffer(buffer, None) };
-    unsafe { device.destroy_device(None) }
-    unsafe { instance.destroy_instance(None) }
+    for _ in 0..MAX_FRAMES_IN_FLIGHT {
+        data.image_available_semaphores
+            .push(device.create_semaphore(&semaphore_info, None)?);
+        data.render_finished_semaphores
+            .push(device.create_semaphore(&semaphore_info, None)?);
+
+        data.in_flight_fences
+            .push(device.create_fence(&fence_info, None)?);
+    }
+
+    data.images_in_flight = data
+        .swapchain_images
+        .iter()
+        .map(|_| vk::Fence::null())
+        .collect();
 
     Ok(())
 }
